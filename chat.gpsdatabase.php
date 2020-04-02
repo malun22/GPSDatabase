@@ -3,12 +3,10 @@
  *                  GPS Database Plugin                    *
  ***********************************************************
  *                        Features                         *
- * - Adds a chatcommand connects to a google spreadsheet   *
- *   database which compares the tmx id with the ones in   *
- *   database and gives you a link to a GPS Video		   *
+ * - Adds a chatcommand connected to a google spreadsheet  *
+ *   database which compares the tmx id with the one	   *
+ *   currently played and gives a link to a GPS Video	   *
  * - /gps                                                  *
- * - Database gets updated every map skip or manually by   *
- *   using /gps update                                     *
  ***********************************************************
  *                    Created by Malun                     *
  ***********************************************************
@@ -32,36 +30,99 @@
  * see <http://www.gnu.org/licenses/>.                     *
  ***********************************************************
  *                       Installation                      *
- * - Put this plugin in /Controllers/XASECO/plugins        *
+ * - Put this plugin in /XASECO/plugins				       *
  * - activate the plugin in                                *
- *   /TMF04445/Controllers/XASECO/plugins.xml              *
+ *   XASECO/plugins.xml						               *
  \*********************************************************/
-global $spreadsheet_url;
+global $GPSDB;
+
+Aseco::registerEvent("onStartup", "gpsdb_onStartup");
+Aseco::registerEvent('onNewChallenge','gpsdb_onNewTrack');
 
 Aseco::addChatCommand('gps','Sets up the gps command environment');
 
-$spreadsheet_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRSB-eBE6wYXDgtTjDEuGyOsO7XDuozJfAlV8Oa_BYdlCYACrAmAa1j1YvYKyIvfWrNLqez13YCu95_/pub?gid=0&single=true&output=csv";
+function gpsdb_onStartup($aseco) {
+	global $GPSDB;
+	$GPSDB = new GPSDB();
+	$GPSDB->onStartup();
+}
 
-function chat_gps($aseco, $command) {
-global $spreadsheet_url;
+function gpsdb_onNewTrack($aseco,$challenge) {
+	// Get the link if available
+	global $GPSDB;
+	$GPSDB->onNewTrack($challenge);
+}
 
-	if(!ini_set('default_socket_timeout', 15)) $aseco->console("<!-- unable to change socket timeout -->");
+function chat_gps($aseco,$command) {
+	global $GPSDB;
+	$GPSDB->onCommand($command);
+}
 
-	if (($handle = fopen($spreadsheet_url, "r")) !== FALSE) {
-		while (($data = fgetcsv($handle, 1000, ",")) !== FALSE) {
-			$gdb_data[] = $data;
-		}
-		fclose($handle);
-		foreach ($gdb_data AS &$map) {
-			unset($map[3]); unset($map[2]);
+class GPSDB {
+	private $config;
+
+	public function onStartup() {
+		$this->config['URL'] = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRSB-eBE6wYXDgtTjDEuGyOsO7XDuozJfAlV8Oa_BYdlCYACrAmAa1j1YvYKyIvfWrNLqez13YCu95_/pub?gid=0&single=true&output=csv";
+		
+		$this->config['TMXRETRYTIME'] = 5; // in seconds | set 0 to only try once
+
+		$this->msgConsole('Plugin GPS Database by malun initialized.');
+	}
+
+	public function onCommand($command) {
+		$player = $command['author'];
+		$login = $player->login;
+
+		if (isset($this->config['VIDEOURL'])) {
+			if ($this->config['VIDEOURL']) {
+					$this->msgPlayer($login,'GPS available $L[http://youtu.be/' . $this->config['VIDEOURL'] . ']here$z$s.');
+			} else {
+				$this->msgPlayer($login,'{#error}Could not fetch TMX ID.');
+			}
+		} else {
+			$this->msgPlayer($login,'{#error}This map doesn\'t have a GPS linked yet. Visit $L[http://docs.google.com/spreadsheets/d/1Q626InvUyYXG3iybBJQ-_EZ-HGb27FCLUPlwQSR1NTM/]this spreadsheet$z$s{#error} for further information.');
 		}
 	}
-	else
-		die($aseco->console("[chat.gpsdatabase.php] Problem reading csv"));
 
-	$player = $command['author'];
-	$login = $player->login;
-	
+	public function onNewTrack($challenge) {
+		if (!isset($this->config['UID']) || $this->config['UID'] != $challenge->uid) {
+			unset($this->config['VIDEOURL']);
+
+			$sheetdata = $this->getCSVData($this->config['URL']);
+
+			$this->config['UID'] = $challenge->uid;
+
+			$tmxid = $this->getTMXId($this->config['UID']);
+
+			if ($tmxid) {
+				foreach ($sheetdata AS &$map) {
+					if (strpos($map,$tmxid) !== false) {
+						$mapinfo = explode(",",$map);
+						$this->config['VIDEOURL'] = $mapinfo[1];
+						break;
+					}
+				}
+			} else {
+				$this->config['VIDEOURL'] = false;
+			}
+		}
+	}
+
+	private function getCSVData($url) {
+		$curl = curl_init($url);
+		curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+		curl_setopt($curl, CURLOPT_FOLLOWLOCATION, 1);
+		curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
+		curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
+		$gpsdb_data = explode("\n",curl_exec($curl));
+		curl_close($curl);
+		unset($gpsdb_data[0]);
+		return $gpsdb_data;
+	}
+
+	private function getTMXId($uid) {
+	global $aseco;
+
 		if($aseco->server->packmask == "Stadium") {
 			$firstSection = "TMNF";
 			$secondSection = "TMU";
@@ -70,25 +131,39 @@ global $spreadsheet_url;
 			$secondSection = "TMNF";
 		}
 		
-		$data = new \TMXInfoFetcher($firstSection, $aseco->server->challenge->uid, false);
-		
-		$tmxid = $data->id;
-		unset($data);
-		
-		foreach ($gdb_data AS &$map) {
-			if ($map[0] == $tmxid) {
-				$vid = $map[1];
-				break;
+		$timestamp = time();
+
+		if ($this->config['TMXRETRYTIME'] > 0) {
+			while(!isset($data->id) AND time() <= $timestamp + $this->config['TMXRETRYTIME'] * 1000) {
+				$data = new \TMXInfoFetcher($firstSection, $uid, false);
 			}
-		}
-		
-		if ($vid != NULL) {
-			$msg = '$z$s> GPS available $L[http://youtu.be/' . $vid . ']here$z$s.';
 		} else {
-			$msg = '$z$s> There is no GPS Video linked yet. Visit $L[http://docs.google.com/spreadsheets/d/1Q626InvUyYXG3iybBJQ-_EZ-HGb27FCLUPlwQSR1NTM/]this spreadsheet$z$s to fill the database. Or TMX is down.';
+			$data = new \TMXInfoFetcher($firstSection, $uid, false);
 		}
-		$aseco->client->query('ChatSendServerMessageToLogin', $msg, $login);
-	
-	unset($gdb_data);
+
+		if (isset($data)) {
+			return $data->id;
+		} else {
+			return false;
+		}
+	}
+
+	private function msgPlayer($login,$msg) {
+		global $aseco;
+
+		$aseco->client->query('ChatSendServerMessageToLogin', $aseco->formatColors('{#server}> ' . $msg), $login);
+	}
+
+	private function msgAll($msg) {
+		global $aseco;
+
+		$aseco->client->query('ChatSendServerMessage', $aseco->formatColors('{#server}> ' . $msg));
+	}
+
+	private function msgConsole($msg) {
+		global $aseco;
+
+		$aseco->console('[chat.gpsdatabase.php] ' . $msg);
+	}
 }
 ?>
