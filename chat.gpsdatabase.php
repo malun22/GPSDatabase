@@ -64,47 +64,70 @@ class GPSDB {
 	public function onStartup() {
 		$this->config['URL'] = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRSB-eBE6wYXDgtTjDEuGyOsO7XDuozJfAlV8Oa_BYdlCYACrAmAa1j1YvYKyIvfWrNLqez13YCu95_/pub?gid=0&single=true&output=csv";
 		
-		$this->config['TMXRETRYTIME'] = 5; // in seconds | set 0 to only try once
+		$this->config['TMXRETRYTIME'] = 1; // in seconds | set 0 to only try once
 
 		$this->msgConsole('Plugin GPS Database by malun initialized.');
 	}
 
 	public function onCommand($command) {
+	global $aseco;
+		
 		$player = $command['author'];
 		$login = $player->login;
 
-		if (isset($this->config['VIDEOURL'])) {
-			if ($this->config['VIDEOURL']) {
-					$this->msgPlayer($login,'GPS available $L[http://youtu.be/' . $this->config['VIDEOURL'] . ']here$z$s.');
+		// split params into arrays & insure optional parameters exist cloned from chat.admin.php by Xymph
+		$arglist = explode(' ', $command['params'], 2);
+		if (!isset($arglist[1])) $arglist[1] = '';
+		$command['params'] = explode(' ', preg_replace('/ +/', ' ', $command['params']));
+		if (!isset($command['params'][1])) $command['params'][1] = '';
+
+		if ($command['params'][0] == '') {
+			if (isset($this->config['VIDEOURL'])) {
+				if ($this->config['VIDEOURL']) {
+						$this->msgPlayer($login,'GPS available $L[http://youtu.be/' . $this->config['VIDEOURL'] . ']here$z$s.');
+				} else {
+					$this->msgPlayer($login,'{#error}Could not fetch TMX ID.');
+				}
 			} else {
-				$this->msgPlayer($login,'{#error}Could not fetch TMX ID.');
+				$this->msgPlayer($login,'{#error}This map doesn\'t have a GPS linked yet. Visit $L[http://docs.google.com/spreadsheets/d/1Q626InvUyYXG3iybBJQ-_EZ-HGb27FCLUPlwQSR1NTM/]this spreadsheet$z$s{#error} for further information.');
+			}
+		} elseif ($command['params'][0] == 'update') {
+			if ($aseco->isAnyAdmin($player) || $aseco->isAnyAdmin($player->login)) {
+				$this->updateGPSLink($aseco->server->challenge->uid);
+				$this->msgPlayer($login,'GPS Link updated.');
+			} else {
+				$this->msgPlayer($login,'{#error}You don\'t habe the required permissions.');
 			}
 		} else {
-			$this->msgPlayer($login,'{#error}This map doesn\'t have a GPS linked yet. Visit $L[http://docs.google.com/spreadsheets/d/1Q626InvUyYXG3iybBJQ-_EZ-HGb27FCLUPlwQSR1NTM/]this spreadsheet$z$s{#error} for further information.');
+			$this->msgPlayer($login,'{#error}Use /gps to receive a link to a GPS Video of the running map.');
 		}
 	}
 
 	public function onNewTrack($challenge) {
 		if (!isset($this->config['UID']) || $this->config['UID'] != $challenge->uid) {
-			unset($this->config['VIDEOURL']);
+			$this->updateGPSLink($challenge->uid);
+		}
+	}
 
-			$sheetdata = $this->getCSVData($this->config['URL']);
+	private function updateGPSLink($uid) {
+		unset($this->config['VIDEOURL']);
 
-			$this->config['UID'] = $challenge->uid;
+		$sheetdata = $this->getCSVData($this->config['URL']);
 
-			$tmxid = $this->getTMXId($this->config['UID']);
+		$this->config['UID'] = $uid;
 
-			if ($tmxid) {
-				foreach ($sheetdata AS &$map) {
-					if (strpos($map,$tmxid) !== false) {
-						$mapinfo = explode(",",$map);
-						$this->config['VIDEOURL'] = $mapinfo[1];
-						break;
-					}
+		$tmxid = $this->getTMXId($this->config['UID']);
+
+		if ($tmxid) {
+			foreach ($sheetdata AS &$map) {
+				if (strpos($map,$tmxid) !== false) {
+					$mapinfo = explode(",",$map);
+					$this->config['VIDEOURL'] = $mapinfo[1];
+					break;
 				}
-			} else {
-				$this->config['VIDEOURL'] = false;
 			}
+		} else {
+			$this->config['VIDEOURL'] = false;
 		}
 	}
 
@@ -134,7 +157,7 @@ class GPSDB {
 		$timestamp = time();
 
 		if ($this->config['TMXRETRYTIME'] > 0) {
-			while(!isset($data->id) AND time() <= $timestamp + $this->config['TMXRETRYTIME'] * 1000) {
+			while(!isset($data->id) AND time() <= $timestamp + $this->config['TMXRETRYTIME']) {
 				$data = new \TMXInfoFetcher($firstSection, $uid, false);
 			}
 		} else {
